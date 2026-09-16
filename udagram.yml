@@ -1,0 +1,240 @@
+Description: CD12352 - Infrastructure as Code Project - Udagram
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Description: Environment name for application resources
+    Default: udagram-application
+
+  AsgMinCapacity:
+    Type: Number
+    Description: min. number of application instances in each private subnet
+    Default: 2
+  
+  AsgDesiredCapacity:
+    Type: Number
+    Description: desired Number of application instances in each private subnet
+    Default: 2
+
+  AsgMaxCapacity:
+    Type: Number
+    Description: max. number of application instances in each private subnet
+    Default: 4
+
+Resources:
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Ref EnvironmentName
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-vpc-id"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties: 
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              apt-get update -y
+              sudo apt-get install nginx -y
+              systemctl start nginx
+              systemctl enable nginx
+
+              #Remove the default Nginx index page to prevent conflicts
+              rm -f /var/www/html/*.html
+
+              # Create index.html directly in the web directory
+              echo "<!DOCTYPE html>
+              <html>
+              <head>
+              <title>It works! Udagram, Udacity</title>
+              </head>
+              <body>
+              <h1>it works! Udagram, Udacity</h1>
+              <p>This website is hosted on Nginx.</p>
+              </body>
+              </html>" > /var/www/html/index.html
+
+              #Ensure Nginx has permission to read the file
+              chown -R www-data:www-data /var/www/html
+              chmod -R 755 /var/www/html
+
+              # Reload Nginx to apply changes
+              systemctl reload nginx
+        ImageId: ami-0557a15b87f6559cf
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        InstanceType: t3.small
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+        # The following property is added to give the instances access
+        # to read data from your S3 bucket
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+ 
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-private-subnets"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref AsgMinCapacity
+      DesiredCapacity: !Ref AsgDesiredCapacity
+      MaxSize: !Ref AsgMaxCapacity
+      TargetGroupARNs:
+      - Ref: TargetGroup
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http access to our load balancer
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-vpc-id"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue: !Sub "${EnvironmentName}-public-subnets"
+      SecurityGroups:
+      - Ref: LoadBalancerSecurityGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: TargetGroup
+      LoadBalancerArn:
+        Ref: LoadBalancer
+      Port: '80'
+      Protocol: HTTP
+
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'TargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'Listener'
+      Priority: 1
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-vpc-id"
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-${AWS::AccountId}-udagram-bucket"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Status: "Enabled"
+            NoncurrentVersionExpirationInDays: 10
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: '*'
+          Action: s3:GetObject
+          Resource: !Sub "${S3Bucket.Arn}/*"
+
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-instance-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: 'Allow'
+          Principal:
+            Service:
+            - 'ec2.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: s3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                Resource:
+                  - !GetAtt S3Bucket.Arn
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+      - !Ref IAMRole
+
+Outputs:
+
+  LoadBalancerDNSName:
+    Description: DNS name of the public application load balancer
+    Value: !GetAtt LoadBalancer.DNSName
+
+  LoadBalancerURL:
+    Description: HTTP URL of the public application load balancer
+    Value: !Sub "http://${LoadBalancer.DNSName}"
