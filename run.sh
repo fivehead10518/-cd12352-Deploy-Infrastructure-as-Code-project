@@ -103,15 +103,16 @@ case "$EXECUTION_MODE" in
         ;;
 
     delete)
-        BUCKET_NAME=$("${AWS_CMD[@]}" cloudformation describe-stacks \
+        echo "Looking up S3 bucket associated with stack $STACK_NAME..."
+        BUCKET_NAME=$("${AWS_CMD[@]}" cloudformation describe-stack-resources \
             --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='S3BucketName'].OutputValue | [0]" \
+            --query "StackResources[?ResourceType=='AWS::S3::Bucket'].PhysicalResourceId" \
             --output text \
             --region "$REGION" 2>/dev/null || true)
 
         if [[ -n "$BUCKET_NAME" && "$BUCKET_NAME" != "None" ]]; then
             echo "Emptying S3 bucket $BUCKET_NAME..."
-            "${AWS_CMD[@]}" s3 rm "s3://$BUCKET_NAME" --recursive --region "$REGION"
+            "${AWS_CMD[@]}" s3 rm "s3://$BUCKET_NAME" --recursive --region "$REGION" >/dev/null 2>&1 || true
         fi
 
         "${AWS_CMD[@]}" cloudformation delete-stack \
@@ -123,10 +124,5 @@ case "$EXECUTION_MODE" in
             --stack-name "$STACK_NAME" \
             --region "$REGION"
         echo "Stack $STACK_NAME deleted successfully."
-        ;;
-
-    *)
-        echo "ERROR: Incorrect execution mode. Valid values: deploy, delete, preview."
-        exit 1
         ;;
 esac
