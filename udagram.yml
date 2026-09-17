@@ -5,7 +5,7 @@ Parameters:
   EnvironmentName:
     Type: String
     Description: Environment name for application resources
-    Default: udagram-application
+    Default: udagram-network
 
   AsgMinCapacity:
     Type: Number
@@ -49,26 +49,20 @@ Resources:
             !Sub |
               #!/bin/bash
               apt-get update -y
-              sudo apt-get install nginx -y
+              # Installiere Nginx UND die AWS CLI
+              sudo apt-get install nginx awscli -y
               systemctl start nginx
               systemctl enable nginx
 
-              #Remove the default Nginx index page to prevent conflicts
               rm -f /var/www/html/*.html
+            
+              # Cronjob, um den S3 Bucket jede Minute zu synchronisieren
+              echo "* * * * * aws s3 sync s3://${EnvironmentName}-${AWS::AccountId}-udagram-bucket /var/www/html/ && chown -R www-data:www-data /var/www/html" | crontab -
 
-              # Create index.html directly in the web directory
-              echo "<!DOCTYPE html>
-              <html>
-              <head>
-              <title>It works! Udagram, Udacity</title>
-              </head>
-              <body>
-              <h1>it works! Udagram, Udacity</h1>
-              <p>This website is hosted on Nginx.</p>
-              </body>
-              </html>" > /var/www/html/index.html
+              # Lade alle Dateien aus dem S3 Bucket in den Web-Ordner
+              aws s3 sync s3://${EnvironmentName}-${AWS::AccountId}-udagram-bucket /var/www/html/
 
-              #Ensure Nginx has permission to read the file
+              # Ensure Nginx has permission to read the file
               chown -R www-data:www-data /var/www/html
               chmod -R 755 /var/www/html
 
@@ -217,8 +211,10 @@ Resources:
                 Action:
                   - 's3:PutObject'
                   - 's3:GetObject'
+                  - 's3:ListBucket'
                 Resource:
                   - !GetAtt S3Bucket.Arn
+                  - !Sub "${S3Bucket.Arn}/*"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
